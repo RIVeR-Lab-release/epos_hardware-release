@@ -1,0 +1,8 @@
+ros-indigo-epos-hardware (0.0.1-0saucy) saucy; urgency=high
+
+  * Initial release of epos_hardware
+  * Contributors: Mitchell Wills
+
+ -- Mitchell Wills <mwills@wpi.edu>  Fri, 30 Jan 2015 05:00:00 -0000
+
+
