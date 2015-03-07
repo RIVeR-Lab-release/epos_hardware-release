@@ -1,8 +1,0 @@
-ros-indigo-epos-library (0.0.1-0trusty) trusty; urgency=high
-
-  * initial release of 64-bit EPOS Linux libraries
-  * Contributors: Mitchell Wills
-
- -- Mitchell Wills <mwills@wpi.edu>  Fri, 30 Jan 2015 05:00:00 -0000
-
-
