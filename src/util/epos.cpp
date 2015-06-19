@@ -11,7 +11,7 @@ Epos::Epos(const std::string& name,
 	   hardware_interface::PositionActuatorInterface& api)
   : name_(name), config_nh_(config_nh), diagnostic_updater_(nh, config_nh), epos_factory_(epos_factory),
     has_init_(false),
-    position_(0), velocity_(0), effort_(0), current_(0),
+    position_(0), velocity_(0), effort_(0), current_(0), statusword_(0),
     position_cmd_(0), velocity_cmd_(0) {
 
   valid_ = true;
@@ -61,6 +61,9 @@ Epos::Epos(const std::string& name,
   std::stringstream motor_diagnostic_name_ss;
   motor_diagnostic_name_ss << name << ": " << "Motor";
   diagnostic_updater_.add(motor_diagnostic_name_ss.str(), boost::bind(&Epos::buildMotorStatus, this, _1));
+  std::stringstream motor_output_diagnostic_name_ss;
+  motor_output_diagnostic_name_ss << name << ": " << "Motor Output";
+  diagnostic_updater_.add(motor_output_diagnostic_name_ss.str(), boost::bind(&Epos::buildMotorOutputStatus, this, _1));
 }
 
 Epos::~Epos() {
@@ -105,29 +108,27 @@ private:
   std::vector<std::string> not_found_;
 };
 
-#define VCS(func, ...) do {						\
- if(!VCS_##func(node_handle_->device_handle->ptr, node_handle_->node_id, __VA_ARGS__, &error_code)) { \
-   ROS_ERROR("Failed to "#func);					\
-   return false;							\
- } 									\
-} while(0)
+#define VCS(func, ...)							\
+  if(!VCS_##func(node_handle_->device_handle->ptr, node_handle_->node_id, __VA_ARGS__, &error_code)) { \
+    ROS_ERROR("Failed to "#func);					\
+    return false;							\
+  }
 
-#define VCS_FROM_SINGLE_PARAM_REQUIRED(nh, type, name, func) {		\
-      type name;							\
-      if(!nh.getParam(#name, name)) {					\
-	ROS_ERROR_STREAM(nh.resolveName(#name) << " not specified");	\
-	return false;							\
-      }									\
-      else {								\
-	VCS(func, name);						\
-      }									\
-      } while(0)
-#define VCS_FROM_SINGLE_PARAM_OPTIONAL(nh, type, name, func) do { \
-      type name;						  \
-      if(nh.getParam(#name, name)) {				  \
-	VCS(func, name);					  \
-      }								  \
-      } while(0)
+#define VCS_FROM_SINGLE_PARAM_REQUIRED(nh, type, name, func)		\
+  type name;								\
+  if(!nh.getParam(#name, name)) {					\
+    ROS_ERROR_STREAM(nh.resolveName(#name) << " not specified");	\
+    return false;							\
+  }									\
+  else {								\
+    VCS(func, name);							\
+  }
+#define VCS_FROM_SINGLE_PARAM_OPTIONAL(nh, type, name, func)		\
+  bool name##_set;							\
+  type name;								\
+  if(name##_set = nh.getParam(#name, name)) {				\
+    VCS(func, name);							\
+  }									\
 
 
 bool Epos::init() {
@@ -157,8 +158,39 @@ bool Epos::init() {
 
   VCS(SetOperationMode, operation_mode_);
 
+  std::string fault_reaction_str;
+#define SET_FAULT_REACTION_OPTION(val)					\
+  do {									\
+    unsigned int length = 2;						\
+    unsigned int bytes_written;						\
+    int16_t data = val;							\
+    VCS(SetObject, 0x605E, 0x00, &data, length, &bytes_written);	\
+  } while(true)
+
+  if(config_nh_.getParam("fault_reaction_option", fault_reaction_str)) {
+    if(fault_reaction_str == "signal_only") {
+      SET_FAULT_REACTION_OPTION(-1);
+    }
+    else if(fault_reaction_str == "disable_drive") {
+      SET_FAULT_REACTION_OPTION(0);
+    }
+    else if(fault_reaction_str == "slow_down_ramp") {
+      SET_FAULT_REACTION_OPTION(1);
+    }
+    else if(fault_reaction_str == "slow_down_quickstop") {
+      SET_FAULT_REACTION_OPTION(2);
+    }
+    else {
+      ROS_ERROR_STREAM(fault_reaction_str << " is not a valid fault reaction option");
+      return false;
+    }
+  }
+
+
   ROS_INFO("Configuring Motor");
   {
+    nominal_current_ = 0;
+    max_current_ = 0;
     ros::NodeHandle motor_nh(config_nh_, "motor");
 
     VCS_FROM_SINGLE_PARAM_REQUIRED(motor_nh, int, type, SetMotorType);
@@ -175,10 +207,12 @@ bool Epos::init() {
 	 .all_or_none(dc_motor))
 	return false;
       if(dc_motor){
+	nominal_current_ = nominal_current;
+	max_current_ = max_output_current;
 	VCS(SetDcMotorParameter,
-	    1000 * nominal_current, // A -> mA
-	    1000 * max_output_current, // A -> mA
-	    10 * thermal_time_constant // s -> 100ms
+	    (int)(1000 * nominal_current), // A -> mA
+	    (int)(1000 * max_output_current), // A -> mA
+	    (int)(10 * thermal_time_constant) // s -> 100ms
 	    );
       }
     }
@@ -199,10 +233,12 @@ bool Epos::init() {
 	return false;
 
       if(ec_motor) {
+	nominal_current_ = nominal_current;
+	max_current_ = max_output_current;
 	VCS(SetEcMotorParameter,
-	    1000 * nominal_current, // A -> mA
-	    1000 * max_output_current, // A -> mA
-	    10 * thermal_time_constant, // s -> 100ms
+	    (int)(1000 * nominal_current), // A -> mA
+	    (int)(1000 * max_output_current), // A -> mA
+	    (int)(10 * thermal_time_constant), // s -> 100ms
 	    number_of_pole_pairs);
       }
     }
@@ -274,6 +310,10 @@ bool Epos::init() {
     VCS_FROM_SINGLE_PARAM_OPTIONAL(safety_nh, int, max_following_error, SetMaxFollowingError);
     VCS_FROM_SINGLE_PARAM_OPTIONAL(safety_nh, int, max_profile_velocity, SetMaxProfileVelocity);
     VCS_FROM_SINGLE_PARAM_OPTIONAL(safety_nh, int, max_acceleration, SetMaxAcceleration);
+    if(max_profile_velocity_set)
+      max_profile_velocity_ = max_profile_velocity;
+    else
+      max_profile_velocity_ = -1;
   }
 
   {
@@ -385,7 +425,7 @@ bool Epos::init() {
       if(position_profile_window){
 	VCS(EnablePositionWindow,
 	    window,
-	    1000 * time // s -> ms
+	    (int)(1000 * time) // s -> ms
 	    );
       }
     }
@@ -419,7 +459,7 @@ bool Epos::init() {
       if(velocity_profile_window){
 	VCS(EnableVelocityWindow,
 	    window,
-	    1000 * time // s -> ms
+	    (int)(1000 * time) // s -> ms
 	    );
       }
     }
@@ -438,16 +478,36 @@ bool Epos::init() {
     ROS_WARN_STREAM("EPOS Device Error: 0x" << std::hex << error_number);
   }
 
-  bool clear_faults = false;
-  config_nh_.getParam("clear_faults", clear_faults);
-  if(clear_faults) {
-    ROS_INFO("Clearing faults");
-    if(!VCS_ClearFault(node_handle_->device_handle->ptr, node_handle_->node_id, &error_code)) {
-      ROS_ERROR("Could not clear faults");
+  bool clear_faults;
+  config_nh_.param<bool>("clear_faults", clear_faults, false);
+  if(num_errors > 0) {
+    if(clear_faults) {
+      ROS_INFO("Clearing faults");
+      if(!VCS_ClearFault(node_handle_->device_handle->ptr, node_handle_->node_id, &error_code)) {
+	ROS_ERROR("Could not clear faults");
+	return false;
+      }
+      else
+	ROS_INFO("Cleared faults");
+    }
+    else {
+      ROS_ERROR("Not clearing faults, but faults exist");
       return false;
     }
-    else
-      ROS_INFO("Cleared faults");
+  }
+
+  if(!VCS_GetNbOfDeviceError(node_handle_->device_handle->ptr, node_handle_->node_id, &num_errors, &error_code))
+    return false;
+  if(num_errors > 0) {
+    ROS_ERROR("Not all faults were cleared");
+    return false;
+  }
+
+  config_nh_.param<bool>("halt_velocity", halt_velocity_, false);
+
+  if(!config_nh_.getParam("torque_constant", torque_constant_)) {
+    ROS_WARN("No torque constant specified, you can supply one using the 'torque_constant' parameter");
+    torque_constant_ = 1.0;
   }
 
   ROS_INFO_STREAM("Enabling Motor");
@@ -463,6 +523,11 @@ void Epos::read() {
     return;
 
   unsigned int error_code;
+
+  // Read statusword
+  unsigned int bytes_read;
+  VCS_GetObject(node_handle_->device_handle->ptr, node_handle_->node_id, 0x6041, 0x00, &statusword_, 2, &bytes_read, &error_code);
+
   int position_raw;
   int velocity_raw;
   short current_raw;
@@ -471,8 +536,9 @@ void Epos::read() {
   VCS_GetCurrentIs(node_handle_->device_handle->ptr, node_handle_->node_id, &current_raw, &error_code);
   position_ = position_raw;
   velocity_ = velocity_raw;
-  effort_ = 0;
   current_ = current_raw  / 1000.0; // mA -> A
+  effort_ = current_ * torque_constant_;
+
 }
 
 void Epos::write() {
@@ -481,9 +547,26 @@ void Epos::write() {
 
   unsigned int error_code;
   if(operation_mode_ == PROFILE_VELOCITY_MODE) {
-    VCS_MoveWithVelocity(node_handle_->device_handle->ptr, node_handle_->node_id, (int)velocity_cmd_, &error_code);
+    if(isnan(velocity_cmd_))
+      return;
+    int cmd = (int)velocity_cmd_;
+    if(max_profile_velocity_ >= 0) {
+      if(cmd < -max_profile_velocity_)
+	cmd = -max_profile_velocity_;
+      if(cmd > max_profile_velocity_)
+	cmd = max_profile_velocity_;
+    }
+
+    if(cmd == 0 && halt_velocity_) {
+      VCS_HaltVelocityMovement(node_handle_->device_handle->ptr, node_handle_->node_id, &error_code);
+    }
+    else {
+      VCS_MoveWithVelocity(node_handle_->device_handle->ptr, node_handle_->node_id, cmd, &error_code);
+    }
   }
   else if(operation_mode_ == PROFILE_POSITION_MODE) {
+    if(isnan(position_cmd_))
+      return;
     VCS_MoveToPosition(node_handle_->device_handle->ptr, node_handle_->node_id, (int)position_cmd_, true, true, &error_code);
   }
 }
@@ -495,43 +578,32 @@ void Epos::buildMotorStatus(diagnostic_updater::DiagnosticStatusWrapper &stat) {
   stat.add("Actuator Name", actuator_name_);
   unsigned int error_code;
   if(has_init_) {
-    unsigned short state;
-    std::string state_str;
-    if(VCS_GetState(node_handle_->device_handle->ptr, node_handle_->node_id, &state, &error_code)) {
-      if(state == ST_DISABLED) {
-	stat.summary(diagnostic_msgs::DiagnosticStatus::OK, "Disabled");
-	state_str = "Disabled";
-      }
-      else if(state == ST_ENABLED) {
-	stat.summary(diagnostic_msgs::DiagnosticStatus::OK, "Enabled");
-	state_str = "Enabled";
-      }
-      else if(state == ST_QUICKSTOP) {
-	stat.summary(diagnostic_msgs::DiagnosticStatus::WARN, "Quickstop");
-	state_str = "Quickstop";
-      }
-      else if(state == ST_FAULT) {
-	stat.summary(diagnostic_msgs::DiagnosticStatus::ERROR, "Fault");
-	state_str = "Fault";
-      }
-      else {
-	stat.summary(diagnostic_msgs::DiagnosticStatus::ERROR, "Unknown State");
-	state_str = "Unknown";
-      }
-      stat.add("State", state_str);
+    bool enabled = STATUSWORD(READY_TO_SWITCH_ON, statusword_) && STATUSWORD(SWITCHED_ON, statusword_) && STATUSWORD(ENABLE, statusword_);
+    if(enabled) {
+      stat.summary(diagnostic_msgs::DiagnosticStatus::OK, "Enabled");
     }
     else {
-      std::string error_str;
-      if(GetErrorInfo(error_code, &error_str)) {
-	std::stringstream error_msg;
-	error_msg << "Could not read state: " << error_str;
-	stat.summary(diagnostic_msgs::DiagnosticStatus::ERROR, error_msg.str());
-      }
-      else {
-	stat.summary(diagnostic_msgs::DiagnosticStatus::ERROR, "Could not read state");
-      }
-      return;
+      stat.summary(diagnostic_msgs::DiagnosticStatus::OK, "Disabled");
     }
+
+    // Quickstop is enabled when bit is unset (only read quickstop when enabled)
+    if(!STATUSWORD(QUICKSTOP, statusword_) && enabled) {
+      stat.mergeSummary(diagnostic_msgs::DiagnosticStatus::WARN, "Quickstop");
+    }
+
+    if(STATUSWORD(WARNING, statusword_)) {
+      stat.mergeSummary(diagnostic_msgs::DiagnosticStatus::WARN, "Warning");
+    }
+
+    if(STATUSWORD(FAULT, statusword_)) {
+      stat.mergeSummary(diagnostic_msgs::DiagnosticStatus::ERROR, "Fault");
+    }
+
+    stat.add<bool>("Enabled", STATUSWORD(ENABLE, statusword_));
+    stat.add<bool>("Fault", STATUSWORD(FAULT, statusword_));
+    stat.add<bool>("Voltage Enabled", STATUSWORD(VOLTAGE_ENABLED, statusword_));
+    stat.add<bool>("Quickstop", STATUSWORD(QUICKSTOP, statusword_));
+    stat.add<bool>("Warning", STATUSWORD(WARNING, statusword_));
 
     unsigned char num_errors;
     if(VCS_GetNbOfDeviceError(node_handle_->device_handle->ptr, node_handle_->node_id, &num_errors, &error_code)) {
@@ -565,6 +637,49 @@ void Epos::buildMotorStatus(diagnostic_updater::DiagnosticStatusWrapper &stat) {
       else {
 	stat.mergeSummary(diagnostic_msgs::DiagnosticStatus::ERROR, "Could not read device errors");
       }
+    }
+
+
+  }
+  else {
+    stat.summary(diagnostic_msgs::DiagnosticStatus::ERROR, "EPOS not initialized");
+  }
+}
+
+void Epos::buildMotorOutputStatus(diagnostic_updater::DiagnosticStatusWrapper &stat) {
+  std::string operation_mode_str;
+  if(operation_mode_ == PROFILE_POSITION_MODE) {
+    operation_mode_str = "Profile Position Mode";
+    stat.add("Commanded Position", boost::lexical_cast<std::string>(position_cmd_) + " rotations");
+  }
+  else if(operation_mode_ == PROFILE_VELOCITY_MODE) {
+    operation_mode_str = "Profile Velocity Mode";
+    stat.add("Commanded Velocity", boost::lexical_cast<std::string>(velocity_cmd_) + " rpm");
+  }
+  else {
+    operation_mode_str = "Unknown Mode";
+  }
+  stat.add("Operation Mode", operation_mode_str);
+  stat.add("Nominal Current", boost::lexical_cast<std::string>(nominal_current_) + " A");
+  stat.add("Max Current", boost::lexical_cast<std::string>(max_current_) + " A");
+
+  unsigned int error_code;
+  if(has_init_) {
+    stat.add("Position", boost::lexical_cast<std::string>(position_) + " rotations");
+    stat.add("Velocity", boost::lexical_cast<std::string>(velocity_) + " rpm");
+    stat.add("Torque", boost::lexical_cast<std::string>(effort_) + " Nm");
+    stat.add("Current", boost::lexical_cast<std::string>(current_) + " A");
+
+
+    stat.add<bool>("Target Reached", STATUSWORD(TARGET_REACHED, statusword_));
+    stat.add<bool>("Current Limit Active", STATUSWORD(CURRENT_LIMIT_ACTIVE, statusword_));
+
+
+    stat.summary(diagnostic_msgs::DiagnosticStatus::OK, "EPOS operating in " + operation_mode_str);
+    if(STATUSWORD(CURRENT_LIMIT_ACTIVE, statusword_))
+      stat.mergeSummary(diagnostic_msgs::DiagnosticStatus::WARN, "Current Limit Active");
+    if(nominal_current_ > 0 && std::abs(current_) > nominal_current_) {
+      stat.mergeSummaryf(diagnostic_msgs::DiagnosticStatus::WARN, "Nominal Current Exceeded (Current: %f A)", current_);
     }
 
 
