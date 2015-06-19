@@ -1,0 +1,20 @@
+ros-indigo-epos-library (0.0.3-0saucy) saucy; urgency=high
+
+
+
+ -- Mitchell Wills <mwills@wpi.edu>  Thu, 18 Jun 2015 04:00:00 -0000
+
+ros-indigo-epos-library (0.0.2-0saucy) saucy; urgency=high
+
+
+
+ -- Mitchell Wills <mwills@wpi.edu>  Fri, 06 Mar 2015 05:00:00 -0000
+
+ros-indigo-epos-library (0.0.1-0saucy) saucy; urgency=high
+
+  * initial release of 64-bit EPOS Linux libraries
+  * Contributors: Mitchell Wills
+
+ -- Mitchell Wills <mwills@wpi.edu>  Fri, 30 Jan 2015 05:00:00 -0000
+
+
